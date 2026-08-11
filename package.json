@@ -1,0 +1,28 @@
+{
+  "name": "heartmemory-v2",
+  "version": "2.0.0-alpha.1",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "可迁移、可解释、低成本的长期陪伴记忆基础设施。",
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "demo": "node scripts/demo.mjs",
+    "dev": "node scripts/dev.mjs",
+    "launch": "node scripts/launch.mjs",
+    "dev:api": "node --env-file-if-exists=.env apps/api/src/server.js",
+    "dev:console": "npm --prefix apps/console run dev",
+    "test": "node scripts/test-all.mjs",
+    "test:core": "npm --prefix packages/memory-core test",
+    "test:runtime": "npm --prefix packages/runtime test",
+    "test:api": "npm --prefix apps/api test",
+    "test:console": "npm --prefix apps/console test",
+    "build:console": "npm --prefix apps/console run build",
+    "lint:console": "npm --prefix apps/console run lint",
+    "release:build": "node scripts/build-release.mjs"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}

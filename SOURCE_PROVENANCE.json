@@ -1,0 +1,32 @@
+{
+  "recordedAt": "2026-08-08T00:00:00+08:00",
+  "method": "External research snapshots are not distributed with V2. Their package versions and recorded file hashes are retained here without creating a runtime or test dependency on external folders.",
+  "sources": [
+    {
+      "name": "OpenClaw",
+      "distributedWithV2": false,
+      "packageVersion": "2026.6.9",
+      "license": "MIT",
+      "packageJsonSha256": "9451035f325464c0ca08cccb43a268fa3462a435b7fa64b8cb53a85082dc5980",
+      "licenseSha256": "73571b25326281d369087f469842c02444fe39faaecebda4d82ed21ff3a1c29d"
+    },
+    {
+      "name": "Hermes Agent",
+      "distributedWithV2": false,
+      "packageVersion": "1.0.0",
+      "license": "MIT",
+      "packageJsonSha256": "07b1b0c8d196c93cc4876092907e7350cfc8b04db18ce34debb522aead4ad1c0",
+      "licenseSha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6"
+    }
+  ],
+  "personaSources": [
+    {
+      "name": "用户提供的 AI 伴侣通用角色原稿",
+      "distributedWithV2": false,
+      "sourceType": "user-authored persona reference",
+      "sourceSha256": "78e91bf771f3725f782982ab671675ab39b3acd87e2dfb4d8fb981a1482bace5",
+      "adaptation": "提炼亲密、俏皮、科技意象、短回复和动态身份；删除会制造依赖、内疚、欺骗或伪造定位能力的条款。"
+    }
+  ],
+  "reusePolicy": "V2 is an independent multi-tenant domain implementation. Research sources are provenance only and are not required to build, test, deploy, or understand the product."
+}

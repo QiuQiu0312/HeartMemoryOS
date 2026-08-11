@@ -1,0 +1,15 @@
+{
+  "name": "@heartmemory/memory-core",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Multi-tenant, privacy-first memory core for companion applications.",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "exports": "./src/index.js",
+  "scripts": {
+    "test": "node --test"
+  }
+}

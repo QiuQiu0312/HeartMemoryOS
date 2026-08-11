@@ -1,0 +1,44 @@
+name: 功能建议
+description: 说明真实场景、预期价值以及 Token 和隐私影响
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决什么问题
+      description: 请先描述场景，而不只是某个技术名词
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的行为
+    validations:
+      required: true
+  - type: dropdown
+    id: use_case
+    attributes:
+      label: 主要用途
+      options:
+        - 个人本机使用
+        - 接入已有 APP 或网页
+        - 多用户服务
+        - 商业产品
+        - 研究或评测
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Token、隐私和兼容性影响
+      placeholder: 是否会增加模型调用、保存更多内容、改变 API 或需要新授权？
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交确认
+      options:
+        - label: 我已经搜索过已有 Issue
+          required: true
+        - label: 我没有提交密钥、真实聊天记录或个人信息
+          required: true

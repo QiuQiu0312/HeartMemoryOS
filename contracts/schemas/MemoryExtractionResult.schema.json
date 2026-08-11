@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://companion-memory.invalid/v2/schemas/MemoryExtractionResult.schema.json",
+  "title": "MemoryExtractionResult",
+  "description": "Bounded output proposed by the background memory model. Program-owned scope, consent and cursors are deliberately absent.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "candidates"],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "candidates": {
+      "type": "array",
+      "maxItems": 12,
+      "items": { "$ref": "./MemoryCandidate.schema.json" }
+    }
+  }
+}

@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://companion-memory.invalid/v2/schemas/MemoryCandidate.schema.json",
+  "title": "MemoryCandidate",
+  "description": "A model proposal only. It never carries authority, tenant, user, scope id, cursor, database status, consent, or send permission.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "candidateKind",
+    "realm",
+    "attribution",
+    "subjectRef",
+    "predicateKey",
+    "value",
+    "canonicalText",
+    "polarity",
+    "modality",
+    "temporal",
+    "evidenceMessageIds",
+    "sensitivity",
+    "confidenceBand",
+    "proposedAction"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "candidateKind": {
+      "enum": [
+        "identity", "preference", "boundary", "relationship", "event",
+        "commitment", "routine", "goal", "temporary", "communication_style"
+      ]
+    },
+    "realm": { "$ref": "#/$defs/Realm" },
+    "attribution": { "$ref": "#/$defs/Attribution" },
+    "subjectRef": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "predicateKey": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,127}$" },
+    "value": { "$ref": "#/$defs/BoundedValue" },
+    "canonicalText": { "type": "string", "minLength": 1, "maxLength": 1200 },
+    "polarity": { "enum": ["positive", "negative"] },
+    "modality": { "enum": ["asserted", "preferred", "desired", "planned", "possible", "uncertain"] },
+    "temporal": { "$ref": "#/$defs/Temporal" },
+    "evidenceMessageIds": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": { "type": "string", "minLength": 1, "maxLength": 128 },
+      "uniqueItems": true
+    },
+    "relatedExistingMemoryIds": {
+      "type": "array",
+      "maxItems": 16,
+      "items": { "type": "string", "minLength": 1, "maxLength": 128 },
+      "uniqueItems": true
+    },
+    "sensitivity": { "enum": ["ordinary", "personal", "sensitive", "highly_sensitive", "prohibited"] },
+    "confidenceBand": { "enum": ["low", "medium", "high"] },
+    "proposedAction": { "enum": ["ignore", "keep_candidate", "request_confirmation", "create_temporary_claim"] },
+    "reason": { "type": "string", "maxLength": 800 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "sensitivity": { "const": "highly_sensitive" } }, "required": ["sensitivity"] },
+      "then": { "properties": { "proposedAction": { "const": "request_confirmation" } } }
+    },
+    {
+      "if": { "properties": { "sensitivity": { "const": "prohibited" } } },
+      "then": {
+        "required": ["reason"],
+        "properties": {
+          "value": { "type": "null" },
+          "canonicalText": { "const": "[REDACTED_PROHIBITED]" },
+          "proposedAction": { "const": "ignore" },
+          "reason": { "const": "prohibited_content" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "Realm": {
+      "enum": ["real_world", "relationship_canon", "roleplay", "fictional", "hypothetical", "quoted", "unknown"]
+    },
+    "Attribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assertedByType", "epistemicBasis"],
+      "properties": {
+        "assertedByType": { "enum": ["user", "assistant", "shared_observation", "unknown"] },
+        "assertedByRef": { "type": ["string", "null"], "maxLength": 128 },
+        "epistemicBasis": {
+          "enum": ["explicit_memory_request", "explicit_statement", "user_confirmation", "repeated_inference", "behavioral_signal", "assistant_generated", "quoted_report", "imported_record", "unknown"]
+        },
+        "quotedSpeakerRef": { "type": ["string", "null"], "maxLength": 128 }
+      }
+    },
+    "Temporal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "precision"],
+      "properties": {
+        "kind": { "enum": ["timeless", "point", "interval", "recurring", "unknown"] },
+        "validFrom": { "type": ["string", "null"], "format": "date-time" },
+        "validTo": { "type": ["string", "null"], "format": "date-time" },
+        "occurredAt": { "type": ["string", "null"], "format": "date-time" },
+        "precision": { "enum": ["exact", "day", "month", "year", "relative", "unknown"] },
+        "sourceTimezone": { "type": ["string", "null"], "maxLength": 128 }
+        ,
+        "recurrenceRRule": {
+          "type": ["string", "null"],
+          "maxLength": 512,
+          "pattern": "^[^\\r\\n]+$",
+          "description": "Optional bounded RFC 5545 subset proposal; server parser remains authoritative."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "timeless" } } },
+          "then": {
+            "properties": {
+              "validFrom": { "type": "null" },
+              "validTo": { "type": "null" },
+              "sourceTimezone": { "type": "null" },
+              "recurrenceRRule": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "point" } } },
+          "then": {
+            "required": ["validFrom"],
+            "properties": {
+              "validFrom": { "type": "string", "format": "date-time" },
+              "validTo": { "type": "null" },
+              "recurrenceRRule": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "interval" } } },
+          "then": {
+            "required": ["validFrom", "validTo"],
+            "properties": {
+              "validFrom": { "type": "string", "format": "date-time" },
+              "validTo": { "type": "string", "format": "date-time" },
+              "recurrenceRRule": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "recurring" } } },
+          "then": {
+            "required": ["sourceTimezone", "recurrenceRRule"],
+            "properties": {
+              "sourceTimezone": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "recurrenceRRule": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[^\\r\\n]+$" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "unknown" } } },
+          "then": {
+            "properties": {
+              "validFrom": { "type": "null" },
+              "validTo": { "type": "null" },
+              "sourceTimezone": { "type": "null" },
+              "recurrenceRRule": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "ScalarValue": {
+      "oneOf": [
+        { "type": "string", "maxLength": 2000 },
+        { "type": "number" },
+        { "type": "boolean" },
+        { "type": "null" }
+      ]
+    },
+    "BoundedValue": {
+      "oneOf": [
+        { "$ref": "#/$defs/ScalarValue" },
+        {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/ScalarValue" }
+        },
+        {
+          "type": "object",
+          "maxProperties": 32,
+          "propertyNames": { "type": "string", "maxLength": 128 },
+          "additionalProperties": { "$ref": "#/$defs/ScalarValue" }
+        }
+      ]
+    }
+  }
+}

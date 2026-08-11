@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://companion-memory.invalid/v2/schemas/ExportManifest.schema.json",
+  "title": "ExportManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "formatVersion", "schemaVersion", "exportId", "sourceInstanceId", "portableSubjectId",
+    "createdAt", "expiresAt", "includes", "relationships", "counts", "files", "encryption", "signature",
+    "realmAttributionPreserved", "tombstonesIncluded", "consentActivatesAtDestination"
+  ],
+  "properties": {
+    "formatVersion": { "const": "2.0" },
+    "schemaVersion": { "const": 2 },
+    "exportId": { "$ref": "#/$defs/Id" },
+    "sourceInstanceId": { "$ref": "#/$defs/Id" },
+    "portableSubjectId": {
+      "allOf": [{ "$ref": "#/$defs/Id" }],
+      "description": "Random per export; must not be a stable cross-instance tracking identifier."
+    },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "includes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "enum": ["claims", "claim_revisions", "evidence_refs", "corrections", "relationship_events", "adaptive_profile", "suppression_tombstones", "prompt_metadata", "conversations"] },
+      "uniqueItems": true,
+      "contains": { "const": "suppression_tombstones" },
+      "minContains": 1,
+      "maxContains": 1
+    },
+    "relationships": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/PortableRelationship" },
+      "description": "Random per-export references used only for explicit destination mapping; no source database IDs."
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": { "type": "integer", "minimum": 0 },
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+      "maxProperties": 32
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/FileEntry" },
+      "$comment": "Schema validation is followed by a programmatic uniqueness check for files[].path and files[].nonce; uniqueItems alone cannot enforce unique object properties."
+    },
+    "encryption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "encrypted", "keyManagement"],
+      "properties": {
+        "algorithm": { "enum": ["XChaCha20-Poly1305", "AES-256-GCM"] },
+        "encrypted": { "const": true },
+        "keyManagement": {
+          "oneOf": [
+            { "$ref": "#/$defs/RecipientKeyManagement" },
+            { "$ref": "#/$defs/PassphraseKeyManagement" }
+          ]
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "canonicalization", "keyId", "value"],
+      "properties": {
+        "algorithm": { "enum": ["Ed25519", "ECDSA-P256-SHA256"] },
+        "canonicalization": { "const": "JCS-RFC8785" },
+        "keyId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "value": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{16,4096}$",
+          "description": "Base64url signature over the RFC 8785 canonical manifest with signature.value set to an empty string."
+        }
+      }
+    },
+    "realmAttributionPreserved": { "const": true },
+    "tombstonesIncluded": { "const": true },
+    "consentActivatesAtDestination": { "const": false },
+    "conversationsIncluded": { "type": "boolean", "default": false },
+    "sourcePolicyVersion": { "type": "string", "maxLength": 128 }
+  },
+  "$defs": {
+    "Id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "FileEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "mediaType", "ciphertextBytes", "ciphertextSha256", "nonce"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]{1,512}$" },
+        "mediaType": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "ciphertextBytes": { "type": "integer", "minimum": 16 },
+        "ciphertextSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "Hash of ciphertext including the AEAD tag; never an unhasalted hash of private plaintext."
+        },
+        "nonce": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{16,64}$",
+          "description": "Random, unique per content key and file, base64url encoded."
+        }
+      }
+    },
+    "PortableRelationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["portableRelationshipId", "claimCount", "conversationCount"],
+      "properties": {
+        "portableRelationshipId": {
+          "allOf": [{ "$ref": "#/$defs/Id" }],
+          "description": "Random per export and unlinkable across exports."
+        },
+        "claimCount": { "type": "integer", "minimum": 0 },
+        "conversationCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "RecipientKeyManagement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "keyWrapAlgorithm", "recipientKeyId", "wrappedContentKey"],
+      "properties": {
+        "mode": { "const": "recipient_public_key" },
+        "keyWrapAlgorithm": { "enum": ["X25519-HKDF-SHA256-AES256KW", "RSA-OAEP-256"] },
+        "recipientKeyId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "ephemeralPublicKey": { "type": ["string", "null"], "maxLength": 4096 },
+        "wrappedContentKey": { "type": "string", "pattern": "^[A-Za-z0-9_-]{16,4096}$" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "keyWrapAlgorithm": { "const": "X25519-HKDF-SHA256-AES256KW" } } },
+          "then": { "required": ["ephemeralPublicKey"], "properties": { "ephemeralPublicKey": { "type": "string", "minLength": 32, "maxLength": 4096 } } }
+        },
+        {
+          "if": { "properties": { "keyWrapAlgorithm": { "const": "RSA-OAEP-256" } } },
+          "then": { "properties": { "ephemeralPublicKey": { "type": "null" } } }
+        }
+      ]
+    },
+    "PassphraseKeyManagement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "kdf", "salt", "memoryKiB", "iterations", "parallelism", "wrappedContentKey"],
+      "properties": {
+        "mode": { "const": "one_time_passphrase" },
+        "kdf": { "const": "Argon2id" },
+        "salt": { "type": "string", "pattern": "^[A-Za-z0-9_-]{22,128}$" },
+        "memoryKiB": { "type": "integer", "minimum": 65536, "maximum": 4194304 },
+        "iterations": { "type": "integer", "minimum": 3, "maximum": 20 },
+        "parallelism": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "wrappedContentKey": { "type": "string", "pattern": "^[A-Za-z0-9_-]{16,4096}$" }
+      }
+    }
+  }
+}

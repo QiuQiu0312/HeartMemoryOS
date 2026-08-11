@@ -1,0 +1,3354 @@
+openapi: 3.1.0
+info:
+  title: Companion Memory Engine V2 API
+  version: 2.0.0-draft
+  summary: 可迁移的长期陪伴记忆与主动消息控制面
+  description: |
+    本契约是 V2 HTTP 边界的唯一权威来源。普通接口中的租户和用户身份必须从
+    已验证令牌与服务端关系图推导，不接受客户端提交 tenantId 或 userId。
+    所有写操作必须具备幂等键；修改既有资源还必须使用乐观并发版本。
+    `/turns:prepare` 在任何原文持久化、入队、Embedding 或模型调用之前完成隐私筛查。
+  license:
+    name: Proprietary until project license is chosen
+servers:
+  - url: https://memory.example.invalid
+    description: 生产地址占位；部署时必须替换
+  - url: http://127.0.0.1:8787
+    description: 本地开发
+security:
+  - oauth2:
+      - "memory:read"
+tags:
+  - name: Health
+  - name: Turns
+  - name: Memories
+  - name: Recall
+  - name: Settings
+  - name: Proactive
+  - name: Portability
+  - name: Admin
+
+paths:
+  /health/live:
+    get:
+      tags: [Health]
+      operationId: getLiveness
+      security: []
+      responses:
+        "200":
+          description: 进程存活；不代表依赖就绪
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /health/ready:
+    get:
+      tags: [Health]
+      operationId: getReadiness
+      security: []
+      responses:
+        "200":
+          description: 核心依赖就绪
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v2/turns:prepare:
+    post:
+      tags: [Turns]
+      operationId: prepareTurn
+      summary: 隐私筛查、保存允许保存的输入并编译本轮上下文
+      description: |
+        服务端必须先同步执行隐私筛查，再决定原文、脱敏文本或仅哈希的保存策略。
+        关系与会话必须属于令牌主体。响应中的 ContextEnvelope 已通过硬 Token 上限检查。
+      security:
+        - oauth2: ["memory:write"]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PrepareTurnRequest"
+      responses:
+        "201":
+          description: 已创建本轮准备记录
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrepareTurnResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v2/turns/{turnId}:commit:
+    post:
+      tags: [Turns]
+      operationId: commitTurn
+      summary: 筛查并原子提交助手回复，同时写入异步记忆任务 Outbox
+      description: assistant 输出及拟持久化的 tool 结果必须先通过与本轮绑定的 Egress Privacy Gate。
+      security:
+        - oauth2: ["memory:write"]
+      parameters:
+        - $ref: "#/components/parameters/TurnId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommitTurnRequest"
+      responses:
+        "200":
+          description: 提交成功；重复幂等键返回同一结果
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TurnReceipt"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/turns/{turnId}:fail:
+    post:
+      tags: [Turns]
+      operationId: failTurn
+      summary: 标记模型调用失败，避免对半成品运行记忆抽取
+      security:
+        - oauth2: ["memory:write"]
+      parameters:
+        - $ref: "#/components/parameters/TurnId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [turnToken, reasonCode]
+              properties:
+                turnToken:
+                  type: string
+                  minLength: 32
+                  maxLength: 4096
+                reasonCode:
+                  type: string
+                  enum: [provider_timeout, provider_rejected, invalid_output, user_cancelled, internal_error]
+      responses:
+        "204":
+          description: 已终止；可安全重试该操作
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/memories:
+    get:
+      tags: [Memories]
+      operationId: listMemories
+      summary: 查询当前令牌主体可见的记忆
+      security:
+        - oauth2: ["memory:read"]
+      parameters:
+        - $ref: "#/components/parameters/RelationshipIdOptional"
+        - $ref: "#/components/parameters/ConversationIdOptional"
+        - name: memoryType
+          in: query
+          schema:
+            $ref: "#/components/schemas/MemoryType"
+        - name: realm
+          in: query
+          schema:
+            $ref: "#/components/schemas/Realm"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, contested, expired, pending_confirmation]
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: 分页结果；不返回内部向量或明文审计载荷
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryPage"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/memories:remember:
+    post:
+      tags: [Memories]
+      operationId: rememberExplicitly
+      summary: 保存用户明确要求记住的内容
+      security:
+        - oauth2: ["memory:write"]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RememberRequest"
+      responses:
+        "201":
+          description: 已保存或进入敏感确认流程
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryMutationResult"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/memories/{memoryId}:
+    get:
+      tags: [Memories]
+      operationId: getMemory
+      summary: 查看当前版本、历史版本和经过脱敏的证据说明
+      security:
+        - oauth2: ["memory:read"]
+      parameters:
+        - $ref: "#/components/parameters/MemoryId"
+      responses:
+        "200":
+          description: 记忆详情；证据原文是否可见由保留策略和再次授权决定
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryDetail"
+        "404":
+          description: 不存在或无权访问，响应不区分原因
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/memories/{memoryId}/scope:
+    patch:
+      tags: [Memories]
+      operationId: updateMemoryScope
+      summary: 将记忆设为用户私有、只给当前关系或明确共享给若干关系
+      description: 关系 ID 必须全部属于令牌主体；新增跨关系授权会记录独立 Consent Event。
+      security:
+        - oauth2: ["memory:write"]
+      parameters:
+        - $ref: "#/components/parameters/MemoryId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: "#/components/schemas/MemoryScopePatch"
+      responses:
+        "200":
+          description: 授权集合已原子更新
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryScope"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/memories/{memoryId}:correct:
+    post:
+      tags: [Memories]
+      operationId: correctMemory
+      summary: 追加更正版本，保留审计但旧版本不再参与普通召回
+      security:
+        - oauth2: ["memory:write"]
+      parameters:
+        - $ref: "#/components/parameters/MemoryId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CorrectMemoryRequest"
+      responses:
+        "200":
+          description: 更正完成
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryMutationResult"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/memories/{memoryId}:confirm:
+    post:
+      tags: [Memories]
+      operationId: confirmMemory
+      summary: 确认、拒绝或标记有争议的候选记忆
+      security:
+        - oauth2: ["memory:write"]
+      parameters:
+        - $ref: "#/components/parameters/MemoryId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [decision]
+              properties:
+                decision:
+                  type: string
+                  enum: [confirm, reject, contest]
+                note:
+                  type: string
+                  maxLength: 500
+      responses:
+        "200":
+          description: 决定已应用
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryMutationResult"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/memories/{memoryId}:forget:
+    post:
+      tags: [Memories]
+      operationId: forgetMemory
+      summary: 立即逻辑不可见并创建可追踪的物理清理任务
+      description: 删除事务还会写入抑制规则，防止旧摘要、导入包或队列让内容复活。
+      security:
+        - oauth2: ["memory:write"]
+      parameters:
+        - $ref: "#/components/parameters/MemoryId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [mode]
+              properties:
+                mode:
+                  type: string
+                  enum: [forget_fact, delete_evidence, delete_conversation_range]
+                evidenceId:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                  description: delete_evidence 时必填，且必须属于该 memory 当前或历史 revision。
+                conversationId:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                startSequence:
+                  type: integer
+                  minimum: 1
+                endSequence:
+                  type: integer
+                  minimum: 1
+                  description: 必须大于或等于 startSequence；服务端验证闭区间属于该 memory 的证据来源。
+                reason:
+                  type: string
+                  maxLength: 500
+              allOf:
+                - if: { properties: { mode: { const: forget_fact } } }
+                  then:
+                    properties:
+                      evidenceId: false
+                      conversationId: false
+                      startSequence: false
+                      endSequence: false
+                - if: { properties: { mode: { const: delete_evidence } } }
+                  then:
+                    required: [evidenceId]
+                    properties:
+                      conversationId: false
+                      startSequence: false
+                      endSequence: false
+                - if: { properties: { mode: { const: delete_conversation_range } } }
+                  then:
+                    required: [conversationId, startSequence, endSequence]
+                    properties:
+                      evidenceId: false
+      responses:
+        "202":
+          description: 已立即从读取路径隐藏；异步删除正在进行
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeletionReceipt"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/deletions/{jobId}:
+    get:
+      tags: [Memories]
+      operationId: getDeletion
+      security:
+        - oauth2: ["memory:read"]
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: 删除任务状态
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeletionReceipt"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/suppressions:
+    get:
+      tags: [Memories, Settings]
+      operationId: listSuppressions
+      summary: 查看“不要再记住”规则，不返回原始敏感文本或指纹
+      security:
+        - oauth2: ["memory:read"]
+      parameters:
+        - $ref: "#/components/parameters/RelationshipIdOptional"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: 当前有效和已失效规则的分页列表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuppressionPage"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Memories, Settings]
+      operationId: createSuppression
+      summary: 创建精确内容或受控类别的“以后不要记”规则
+      description: 精确内容只用于生成租户密钥保护的指纹；通过隐私筛查后不得以原文进入规则、日志或任务载荷。
+      security:
+        - oauth2: ["memory:write"]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSuppressionRequest"
+      responses:
+        "201":
+          description: 规则已生效；它不等同于删除既有聊天原文
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuppressionView"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/suppressions/{suppressionId}:
+    delete:
+      tags: [Memories, Settings]
+      operationId: releaseSuppression
+      summary: 停止阻止未来记忆；不会自动恢复已删除内容
+      security:
+        - oauth2: ["memory:write"]
+      parameters:
+        - $ref: "#/components/parameters/SuppressionId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "204":
+          description: 规则已失效，后续内容仍按当时同意与敏感度策略处理
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/privacy/deletions:
+    post:
+      tags: [Memories, Portability]
+      operationId: createPrivacyDeletion
+      summary: 删除一段会话、整段关系或当前账户的全部用户数据
+      description: 高范围删除需要近期重新认证签发的不透明 confirmationNonce；身份仍只取自令牌。
+      security:
+        - oauth2: ["memory:write"]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PrivacyDeletionRequest"
+      responses:
+        "202":
+          description: 读取路径已同步隐藏，传播任务已创建
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeletionReceipt"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/recall:deep:
+    post:
+      tags: [Recall]
+      operationId: deepRecall
+      summary: 用户明确请求或普通召回不足时进行受限的深度查找
+      description: 此接口从不把“没找到”改写为猜测，也不自动修改记忆。
+      security:
+        - oauth2: ["memory:read"]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeepRecallRequest"
+      responses:
+        "200":
+          description: 有证据的查找结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeepRecallResult"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/consents:
+    get:
+      tags: [Settings]
+      operationId: listConsents
+      summary: 查询当前用户按关系和目的拆分的最新同意状态
+      security:
+        - oauth2: ["consent:read"]
+      parameters:
+        - $ref: "#/components/parameters/RelationshipIdOptional"
+        - name: purpose
+          in: query
+          schema:
+            $ref: "#/components/schemas/ConsentPurpose"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: 最新投影；历史事件只在审计/导出中提供
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    maxItems: 100
+                    items:
+                      $ref: "#/components/schemas/ConsentView"
+                  nextCursor:
+                    type: [string, "null"]
+                    maxLength: 2048
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/consents/challenges:
+    post:
+      tags: [Settings]
+      operationId: createConsentChallenge
+      summary: 获取与关系、目的、政策版本和展示文案绑定的一次性同意挑战
+      description: 此接口只读取版本化披露文案，不调用模型，也不直接授予同意。
+      security:
+        - oauth2: ["consent:write"]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [relationshipId, purpose, locale]
+              properties:
+                relationshipId:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                purpose:
+                  $ref: "#/components/schemas/ConsentPurpose"
+                resource:
+                  $ref: "#/components/schemas/ConsentResourceRef"
+                locale:
+                  type: string
+                  minLength: 2
+                  maxLength: 35
+              allOf:
+                - if:
+                    properties:
+                      purpose: { const: cross_relationship_memory_share }
+                  then:
+                    required: [resource]
+                    properties:
+                      resource:
+                        allOf:
+                          - $ref: "#/components/schemas/ConsentResourceRef"
+                          - type: object
+                            properties:
+                              kind: { const: memory_share }
+      responses:
+        "201":
+          description: 客户端必须原样展示披露文案，并在用户确认后提交 challengeToken
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsentChallenge"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/consents:decide:
+    post:
+      tags: [Settings]
+      operationId: decideConsent
+      summary: 授予或撤回单一目的同意
+      description: grant 需要未过期、一次使用且绑定相同关系/目的/政策的 challengeToken；withdraw 永远不要求先取得新挑战。
+      security:
+        - oauth2: ["consent:write"]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConsentDecisionRequest"
+      responses:
+        "200":
+          description: 事件和最新投影已在同一事务提交
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsentView"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/settings/memory:
+    get:
+      tags: [Settings]
+      operationId: getMemorySettings
+      security:
+        - oauth2: ["memory:read"]
+      parameters:
+        - $ref: "#/components/parameters/RelationshipId"
+      responses:
+        "200":
+          description: 记忆设置
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemorySettings"
+        default:
+          $ref: "#/components/responses/Error"
+    patch:
+      tags: [Settings]
+      operationId: updateMemorySettings
+      security:
+        - oauth2: ["memory:write"]
+      parameters:
+        - $ref: "#/components/parameters/RelationshipId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: "#/components/schemas/MemorySettingsPatch"
+      responses:
+        "200":
+          description: 已更新
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemorySettings"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/settings/proactive:
+    get:
+      tags: [Settings, Proactive]
+      operationId: getProactiveSettings
+      security:
+        - oauth2: ["proactive:read"]
+      parameters:
+        - $ref: "#/components/parameters/RelationshipId"
+      responses:
+        "200":
+          description: 主动消息授权与静默时段
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProactiveSettings"
+        default:
+          $ref: "#/components/responses/Error"
+    patch:
+      tags: [Settings, Proactive]
+      operationId: updateProactiveSettings
+      security:
+        - oauth2: ["proactive:write"]
+      parameters:
+        - $ref: "#/components/parameters/RelationshipId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: "#/components/schemas/ProactiveSettingsPatch"
+      responses:
+        "200":
+          description: 已更新；授权撤回后尚未发送的相关事件会被取消
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProactiveSettings"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/proactive/events:
+    get:
+      tags: [Proactive]
+      operationId: listProactiveEvents
+      security:
+        - oauth2: ["proactive:read"]
+      parameters:
+        - $ref: "#/components/parameters/RelationshipId"
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [scheduled, paused, completed, cancelled, expired, failed]
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: 主动事件分页
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    maxItems: 100
+                    items:
+                      $ref: "./schemas/ProactiveEvent.schema.json"
+                  nextCursor:
+                    type: [string, "null"]
+                    maxLength: 2048
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Proactive]
+      operationId: createUserReminder
+      summary: 创建用户明确要求的事务型提醒
+      description: 普通用户接口只能创建 transactional_reminder；关系主动消息由服务端规则和独立授权驱动。
+      security:
+        - oauth2: ["proactive:write"]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateReminderRequest"
+      responses:
+        "201":
+          description: 提醒已持久化；调度器不依赖聊天进程继续运行
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "./schemas/ProactiveEvent.schema.json"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/proactive/events/{eventId}:
+    get:
+      tags: [Proactive]
+      operationId: getProactiveEvent
+      security:
+        - oauth2: ["proactive:read"]
+      parameters:
+        - $ref: "#/components/parameters/EventId"
+      responses:
+        "200":
+          description: 事件详情
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "./schemas/ProactiveEvent.schema.json"
+        default:
+          $ref: "#/components/responses/Error"
+    patch:
+      tags: [Proactive]
+      operationId: updateProactiveEvent
+      summary: 暂停、恢复或修改尚未提交到发送 Outbox 的事件
+      security:
+        - oauth2: ["proactive:write"]
+      parameters:
+        - $ref: "#/components/parameters/EventId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: "#/components/schemas/ProactiveEventPatch"
+      responses:
+        "200":
+          description: 事件已更新并增加 revision
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "./schemas/ProactiveEvent.schema.json"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [Proactive]
+      operationId: cancelProactiveEvent
+      security:
+        - oauth2: ["proactive:write"]
+      parameters:
+        - $ref: "#/components/parameters/EventId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "204":
+          description: 已取消；若已提交到渠道则返回冲突而不是伪装成功
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/exports:
+    post:
+      tags: [Portability]
+      operationId: createExport
+      security:
+        - oauth2: ["data:export"]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateExportRequest"
+      responses:
+        "202":
+          description: 导出任务已创建
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PortabilityJob"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/exports/{jobId}:
+    get:
+      tags: [Portability]
+      operationId: getExport
+      security:
+        - oauth2: ["data:export"]
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: 完成后提供短时签名下载地址与清单
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExportJobResult"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/imports:validate:
+    post:
+      tags: [Portability]
+      operationId: validateImport
+      summary: 只验证签名、哈希、版本与冲突，不写入用户数据
+      security:
+        - oauth2: ["data:import"]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportSource"
+      responses:
+        "200":
+          description: 验证报告
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportValidation"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/imports:
+    post:
+      tags: [Portability]
+      operationId: createImport
+      description: 先应用墓碑/抑制，再导入事实；来源授权不转移，角色扮演内容不得提升为现实事实。
+      security:
+        - oauth2: ["data:import"]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateImportRequest"
+      responses:
+        "202":
+          description: 导入任务已创建
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PortabilityJob"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /v2/imports/{jobId}:
+    get:
+      tags: [Portability]
+      operationId: getImport
+      security:
+        - oauth2: ["data:import"]
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: 导入进度与冲突计数
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PortabilityJob"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/v2/recalls/{traceId}:
+    get:
+      tags: [Admin]
+      operationId: getRecallTrace
+      summary: 查看脱敏召回轨迹；默认无原文
+      security:
+        - oauth2: ["admin:debug"]
+      parameters:
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: 召回审计
+          content:
+            application/json:
+              schema:
+                $ref: "./schemas/RecallTrace.schema.json"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/v2/prompts:
+    get:
+      tags: [Admin]
+      operationId: listPromptVersions
+      security:
+        - oauth2: ["admin:prompt_edit"]
+        - oauth2: ["admin:prompt_publish"]
+      responses:
+        "200":
+          description: 提示词版本元数据；密钥永不返回
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PromptVersion"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/v2/prompts/{promptId}/versions:
+    get:
+      tags: [Admin]
+      operationId: listPromptVersionsById
+      security:
+        - oauth2: ["admin:prompt_edit"]
+        - oauth2: ["admin:prompt_publish"]
+      parameters:
+        - $ref: "#/components/parameters/PromptId"
+      responses:
+        "200":
+          description: 指定提示词的不可变版本元数据
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    maxItems: 500
+                    items:
+                      $ref: "#/components/schemas/PromptVersion"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Admin]
+      operationId: createPromptDraft
+      summary: 创建新草稿版本；已存在或已发布版本绝不原地修改
+      security:
+        - oauth2: ["admin:prompt_edit"]
+      parameters:
+        - $ref: "#/components/parameters/PromptId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePromptDraftRequest"
+      responses:
+        "201":
+          description: 草稿已创建
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromptVersionDetail"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/v2/prompts/{promptId}/versions/{version}:
+    get:
+      tags: [Admin]
+      operationId: getPromptVersion
+      summary: 查看提示词正文、契约和已脱敏发布元数据；不会调用模型
+      security:
+        - oauth2: ["admin:prompt_edit"]
+        - oauth2: ["admin:prompt_publish"]
+      parameters:
+        - $ref: "#/components/parameters/PromptId"
+        - $ref: "#/components/parameters/PromptVersion"
+      responses:
+        "200":
+          description: 提示词版本详情
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromptVersionDetail"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/v2/prompts/{promptId}/versions/{version}:test:
+    post:
+      tags: [Admin]
+      operationId: testPromptVersion
+      summary: 在固定脱敏测试集上运行，不能访问生产原文
+      security:
+        - oauth2: ["admin:prompt_edit"]
+      parameters:
+        - $ref: "#/components/parameters/PromptId"
+        - $ref: "#/components/parameters/PromptVersion"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [datasetId, modelProfileId, maxCostMicros]
+              properties:
+                datasetId:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                modelProfileId:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                maxCostMicros:
+                  type: integer
+                  minimum: 0
+                  maximum: 1000000000
+      responses:
+        "202":
+          description: 测试任务已启动
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminJob"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/v2/prompts/{promptId}/versions/{version}:publish:
+    post:
+      tags: [Admin]
+      operationId: publishPromptVersion
+      summary: 发布已经通过门禁的不可变版本
+      security:
+        - oauth2: ["admin:prompt_publish"]
+      parameters:
+        - $ref: "#/components/parameters/PromptId"
+        - $ref: "#/components/parameters/PromptVersion"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [testRunId, rolloutPercent, approvalTicket]
+              properties:
+                testRunId:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                rolloutPercent:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                approvalTicket:
+                  type: string
+                  minLength: 1
+                  maxLength: 256
+      responses:
+        "200":
+          description: 发布状态
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromptVersion"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/v2/prompts/{promptId}/versions/{version}:rollback:
+    post:
+      tags: [Admin]
+      operationId: rollbackPromptVersion
+      summary: 将流量切回指定的已签名历史版本，不改写历史正文
+      security:
+        - oauth2: ["admin:prompt_publish"]
+      parameters:
+        - $ref: "#/components/parameters/PromptId"
+        - $ref: "#/components/parameters/PromptVersion"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason, approvalTicket]
+              properties:
+                reason:
+                  type: string
+                  minLength: 3
+                  maxLength: 500
+                approvalTicket:
+                  type: string
+                  minLength: 1
+                  maxLength: 256
+      responses:
+        "200":
+          description: 回滚状态
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromptVersion"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/v2/jobs:
+    get:
+      tags: [Admin]
+      operationId: listAdminJobs
+      summary: 查看无正文的 Job/Outbox 状态与累计费用
+      security:
+        - oauth2: ["admin:jobs"]
+      parameters:
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [queued, running, succeeded, retry_wait, dead_letter, cancelled]
+        - name: kind
+          in: query
+          schema:
+            type: string
+            maxLength: 128
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: 后台任务分页
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    maxItems: 100
+                    items:
+                      $ref: "#/components/schemas/AdminJob"
+                  nextCursor:
+                    type: [string, "null"]
+                    maxLength: 2048
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/v2/metrics/overview:
+    get:
+      tags: [Admin]
+      operationId: getAdminMetricsOverview
+      summary: 查询聚合质量、延迟、队列和费用；不返回用户正文
+      security:
+        - oauth2: ["admin:metrics"]
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: 有最小聚合门槛的统计结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminMetricsOverview"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/v2/jobs/{jobId}:retry:
+    post:
+      tags: [Admin]
+      operationId: retryAdminJob
+      summary: 仅重试可证明幂等且未超过死亡队列上限的任务
+      security:
+        - oauth2: ["admin:jobs"]
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: 已接受重试
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminJob"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /admin/v2/kill-switches/{switchName}:
+    patch:
+      tags: [Admin]
+      operationId: updateKillSwitch
+      summary: 紧急停止可选后台能力或主动发送；不关闭基础聊天、显式记忆、纠正和删除能力
+      security:
+        - oauth2: ["admin:operations"]
+      parameters:
+        - name: switchName
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [deep_recall, memory_extraction, segment_summary, embedding_generation, external_memory_sync, adaptive_profile, proactive_generation, proactive_delivery]
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [enabled, reason]
+              properties:
+                enabled:
+                  type: boolean
+                reason:
+                  type: string
+                  minLength: 3
+                  maxLength: 500
+                expiresAt:
+                  type: [string, "null"]
+                  format: date-time
+      responses:
+        "200":
+          description: 开关已更新并写审计日志
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KillSwitch"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+        default:
+          $ref: "#/components/responses/Error"
+
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      description: 授权服务器地址是部署占位；JWT 必须校验 iss、aud、exp、jti 与签名。
+      flows:
+        authorizationCode:
+          authorizationUrl: https://auth.example.invalid/oauth/authorize
+          tokenUrl: https://auth.example.invalid/oauth/token
+          scopes:
+            memory:read: 查看自己的记忆和设置
+            memory:write: 写入、更正、确认、删除自己的记忆
+            consent:read: 查看自己的同意状态
+            consent:write: 查看披露并授予或撤回自己的同意
+            proactive:read: 查看自己的主动事件
+            proactive:write: 管理自己的提醒和主动消息授权
+            data:export: 导出自己的数据
+            data:import: 导入自己的数据
+        clientCredentials:
+          tokenUrl: https://auth.example.invalid/oauth/token
+          scopes:
+            admin:debug: 查看脱敏调试数据
+            admin:prompt_edit: 创建草稿和运行脱敏测试
+            admin:prompt_publish: 发布、灰度和回滚提示词
+            admin:jobs: 管理后台任务
+            admin:metrics: 查看达到最小聚合门槛的运营指标
+            admin:operations: 运行时开关
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: 同一调用方、操作和资源范围内唯一，保存时间不得短于操作可重试窗口。
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 256
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: 上次读取的强 ETag；缺失或过期时拒绝覆盖。
+      schema:
+        type: string
+        minLength: 3
+        maxLength: 256
+    RelationshipId:
+      name: relationshipId
+      in: query
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    RelationshipIdOptional:
+      name: relationshipId
+      in: query
+      required: false
+      description: 省略时查询当前令牌主体的跨关系记忆中心；仍不接受 userId/tenantId。
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    ConversationIdOptional:
+      name: conversationId
+      in: query
+      required: false
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+        maxLength: 2048
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 30
+    TurnId:
+      name: turnId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    MemoryId:
+      name: memoryId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    EventId:
+      name: eventId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    SuppressionId:
+      name: suppressionId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    TraceId:
+      name: traceId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    PromptId:
+      name: promptId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[a-z][a-z0-9._-]{2,127}$"
+    PromptVersion:
+      name: version
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[a-z0-9.-]+)?$"
+
+  headers:
+    ETag:
+      description: 不透明强版本；客户端原样用于 If-Match。
+      schema:
+        type: string
+
+  responses:
+    Error:
+      description: 请求失败
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    BadRequest:
+      description: 参数或契约无效
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Unauthorized:
+      description: 身份令牌无效
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Forbidden:
+      description: 无权访问；不泄露资源是否存在
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Conflict:
+      description: 幂等键载荷冲突、状态冲突或不可取消
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    PreconditionFailed:
+      description: If-Match 与当前版本不一致
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    PayloadTooLarge:
+      description: 请求超过大小或 Token 预算
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    RateLimited:
+      description: 超过频率或成本预算
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    ServiceUnavailable:
+      description: 必需依赖尚未就绪
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+
+  schemas:
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status, version]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded, unavailable]
+        version:
+          type: string
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [ok, degraded, unavailable]
+
+    ScopeRef:
+      type: object
+      additionalProperties: false
+      required: [relationshipId, conversationId]
+      properties:
+        relationshipId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        conversationId:
+          type: string
+          minLength: 1
+          maxLength: 128
+
+    RelationshipScopeRef:
+      type: object
+      additionalProperties: false
+      required: [relationshipId]
+      properties:
+        relationshipId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        conversationId:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 128
+          description: 从会话发起时提供；记忆中心、提醒页或隐私中心可省略。
+
+    SuppressionScopeRef:
+      type: object
+      additionalProperties: false
+      required: [scopeKind]
+      properties:
+        scopeKind:
+          type: string
+          enum: [relationship, all_user_data]
+        relationshipId:
+          type: string
+          minLength: 1
+          maxLength: 128
+      allOf:
+        - if:
+            properties:
+              scopeKind: { const: relationship }
+          then:
+            required: [relationshipId]
+        - if:
+            properties:
+              scopeKind: { const: all_user_data }
+          then:
+            properties:
+              relationshipId: false
+
+    Realm:
+      type: string
+      enum: [real_world, relationship_canon, roleplay, fictional, hypothetical, quoted, unknown]
+    Attribution:
+      type: string
+      enum: [user_self_report, user_about_other, companion_statement, system_observed, imported, inferred]
+    MemoryType:
+      type: string
+      enum: [identity, preference, boundary, relationship, event, commitment, routine, goal, temporary, communication_style]
+    Sensitivity:
+      type: string
+      enum: [ordinary, personal, sensitive, highly_sensitive, prohibited]
+
+    PrepareTurnRequest:
+      type: object
+      additionalProperties: false
+      required: [scope, message, client]
+      properties:
+        scope:
+          $ref: "#/components/schemas/ScopeRef"
+        message:
+          type: object
+          additionalProperties: false
+          required: [clientMessageId, content, sentAt]
+          properties:
+            clientMessageId:
+              type: string
+              minLength: 1
+              maxLength: 128
+            content:
+              type: string
+              minLength: 1
+              maxLength: 32000
+            sentAt:
+              type: string
+              format: date-time
+            replyToMessageId:
+              type: [string, "null"]
+              maxLength: 128
+        client:
+          type: object
+          additionalProperties: false
+          required: [platform, locale, timezone]
+          properties:
+            platform:
+              type: string
+              enum: [ios, android, web, server, other]
+            locale:
+              type: string
+              minLength: 2
+              maxLength: 35
+            timezone:
+              type: string
+              minLength: 1
+              maxLength: 128
+        requestedFeatures:
+          type: array
+          uniqueItems: true
+          maxItems: 8
+          items:
+            type: string
+            enum: [memory_tools, deep_recall_tool, reminder_tool]
+
+    PrepareTurnResponse:
+      type: object
+      additionalProperties: false
+      required: [turnId, turnToken, context, expiresAt]
+      properties:
+        turnId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        turnToken:
+          type: string
+          minLength: 32
+          maxLength: 4096
+        context:
+          $ref: "./schemas/ContextEnvelope.schema.json"
+        expiresAt:
+          type: string
+          format: date-time
+
+    CommitTurnRequest:
+      type: object
+      additionalProperties: false
+      required: [turnToken, assistant, invocation]
+      properties:
+        turnToken:
+          type: string
+          minLength: 32
+          maxLength: 4096
+        assistant:
+          type: object
+          additionalProperties: false
+          required: [content]
+          properties:
+            content:
+              type: string
+              minLength: 1
+              maxLength: 64000
+            toolResultsUsed:
+              type: array
+              maxItems: 16
+              items:
+                type: string
+                maxLength: 128
+        invocation:
+          $ref: "#/components/schemas/ModelInvocationReceipt"
+
+    ModelInvocationReceipt:
+      type: object
+      additionalProperties: false
+      required: [provider, model, promptVersion, inputTokens, outputTokens]
+      properties:
+        provider:
+          type: string
+          minLength: 1
+          maxLength: 128
+        model:
+          type: string
+          minLength: 1
+          maxLength: 128
+        promptVersion:
+          type: string
+          minLength: 1
+          maxLength: 128
+        providerRequestId:
+          type: [string, "null"]
+          maxLength: 256
+        inputTokens:
+          type: integer
+          minimum: 0
+        outputTokens:
+          type: integer
+          minimum: 0
+        cacheReadTokens:
+          type: integer
+          minimum: 0
+          default: 0
+        estimatedCostMicros:
+          type: integer
+          minimum: 0
+
+    TurnReceipt:
+      type: object
+      additionalProperties: false
+      required: [turnId, assistantMessageId, state, backgroundWorkQueued]
+      properties:
+        turnId:
+          type: string
+        assistantMessageId:
+          type: string
+        state:
+          const: committed
+        backgroundWorkQueued:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum: [memory_extraction, embedding, segment_summary, adaptive_profile]
+
+    MemoryView:
+      type: object
+      additionalProperties: false
+      required: [memoryId, memoryType, realm, attribution, epistemicBasis, text, confidenceBand, sensitivity, status, validTime, recordedAt, recordedUntil, revision, scope]
+      properties:
+        memoryId:
+          type: string
+        memoryType:
+          $ref: "#/components/schemas/MemoryType"
+        realm:
+          $ref: "#/components/schemas/Realm"
+        attribution:
+          $ref: "#/components/schemas/Attribution"
+        epistemicBasis:
+          type: string
+          enum: [explicit_memory_request, explicit_statement, user_confirmation, repeated_inference, behavioral_signal, assistant_generated, quoted_report, imported_record, unknown]
+        text:
+          type: string
+          maxLength: 2000
+        confidenceBand:
+          type: string
+          enum: [explicit, high, medium, low, disputed]
+        sensitivity:
+          $ref: "#/components/schemas/Sensitivity"
+        status:
+          type: string
+          enum: [active, contested, expired, pending_confirmation, historical]
+        validTime:
+          $ref: "#/components/schemas/ValidTime"
+        recordedAt:
+          type: string
+          format: date-time
+          description: 本版本进入系统事实历史的起点（system/recorded time），不是事实在现实中生效的时间。
+        recordedUntil:
+          type: [string, "null"]
+          format: date-time
+          description: 本版本在系统历史中的结束时间；null 表示当前版本。与 validTime 共同构成双时间语义。
+        sourceSummary:
+          type: [string, "null"]
+          maxLength: 500
+        revision:
+          type: integer
+          minimum: 1
+        scope:
+          $ref: "#/components/schemas/MemoryScope"
+
+    MemoryPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/MemoryView"
+        nextCursor:
+          type: [string, "null"]
+          maxLength: 2048
+
+    MemoryScope:
+      type: object
+      additionalProperties: false
+      required: [visibility, originRelationshipId, allowedRelationshipIds, revision]
+      properties:
+        visibility:
+          type: string
+          enum: [user_private, relationship_only, explicit_shared]
+        originRelationshipId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        allowedRelationshipIds:
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
+        revision:
+          type: integer
+          minimum: 1
+      allOf:
+        - if:
+            properties:
+              visibility: { const: user_private }
+          then:
+            properties:
+              allowedRelationshipIds: { type: array, maxItems: 0 }
+        - if:
+            properties:
+              visibility: { const: relationship_only }
+          then:
+            properties:
+              allowedRelationshipIds: { type: array, minItems: 1, maxItems: 1 }
+        - if:
+            properties:
+              visibility: { const: explicit_shared }
+          then:
+            properties:
+              allowedRelationshipIds: { type: array, minItems: 2 }
+    MemoryScopePatch:
+      type: object
+      additionalProperties: false
+      required: [allowedRelationshipIds, reason]
+      properties:
+        allowedRelationshipIds:
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          description: 精确的目标关系集合；空数组表示只在用户记忆中心可见。
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+        shareAuthorizations:
+          type: array
+          maxItems: 31
+          uniqueItems: true
+          description: 仅为本次新增的跨关系目标提供；服务端验证每个 Consent Event 的目的、目标关系和 memory scope binding。
+          items:
+            type: object
+            additionalProperties: false
+            required: [relationshipId, consentEventId]
+            properties:
+              relationshipId:
+                type: string
+                minLength: 1
+                maxLength: 128
+              consentEventId:
+                type: string
+                minLength: 1
+                maxLength: 128
+    MemoryDetail:
+      type: object
+      additionalProperties: false
+      required: [current, history, evidence, corrections]
+      properties:
+        current:
+          $ref: "#/components/schemas/MemoryView"
+        history:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/MemoryView"
+        evidence:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/EvidenceView"
+        corrections:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            additionalProperties: false
+            required: [correctionId, previousRevision, replacementRevision, createdAt]
+            properties:
+              correctionId: { type: string, maxLength: 128 }
+              previousRevision: { type: integer, minimum: 1 }
+              replacementRevision: { type: integer, minimum: 2 }
+              reason: { type: [string, "null"], maxLength: 500 }
+              createdAt: { type: string, format: date-time }
+    EvidenceView:
+      type: object
+      additionalProperties: false
+      required: [evidenceId, sourceKind, sourceAvailable, speakerRole, recordedAt]
+      properties:
+        evidenceId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        sourceKind:
+          type: string
+          enum: [message, segment_summary, explicit_form, import_manifest]
+        sourceAvailable:
+          type: boolean
+        speakerRole:
+          type: string
+          enum: [user, assistant, tool, shared_observation, unknown]
+        excerpt:
+          type: [string, "null"]
+          maxLength: 1000
+        realm:
+          $ref: "#/components/schemas/Realm"
+        recordedAt:
+          type: string
+          format: date-time
+
+    RememberRequest:
+      type: object
+      additionalProperties: false
+      required: [scope, content, realm]
+      properties:
+        scope:
+          $ref: "#/components/schemas/RelationshipScopeRef"
+        content:
+          type: string
+          minLength: 1
+          maxLength: 4000
+        realm:
+          $ref: "#/components/schemas/Realm"
+        memoryType:
+          $ref: "#/components/schemas/MemoryType"
+        initialVisibility:
+          type: string
+          enum: [relationship_only, user_private]
+          default: relationship_only
+        validTime:
+          $ref: "#/components/schemas/ValidTime"
+        sourceMessageId:
+          type: [string, "null"]
+          maxLength: 128
+
+    CorrectMemoryRequest:
+      type: object
+      additionalProperties: false
+      required: [replacement, correctionReason]
+      properties:
+        replacement:
+          type: string
+          minLength: 1
+          maxLength: 4000
+        correctionReason:
+          type: string
+          minLength: 1
+          maxLength: 500
+        validTime:
+          $ref: "#/components/schemas/ValidTime"
+        realm:
+          $ref: "#/components/schemas/Realm"
+
+    MemoryMutationResult:
+      type: object
+      additionalProperties: false
+      required: [memory, disposition]
+      properties:
+        memory:
+          $ref: "#/components/schemas/MemoryView"
+        disposition:
+          type: string
+          enum: [stored, pending_confirmation, corrected, confirmed, contested]
+
+    ValidTime:
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [timeless, point, interval, recurring, unknown]
+        startsAt:
+          type: [string, "null"]
+          format: date-time
+        endsAt:
+          type: [string, "null"]
+          format: date-time
+        timezone:
+          type: [string, "null"]
+          maxLength: 128
+        recurrenceRRule:
+          type: [string, "null"]
+          maxLength: 512
+          pattern: "^[^\\r\\n]+$"
+      allOf:
+        - if: { properties: { kind: { const: timeless } } }
+          then:
+            properties:
+              startsAt: { type: "null" }
+              endsAt: { type: "null" }
+              timezone: { type: "null" }
+              recurrenceRRule: { type: "null" }
+        - if: { properties: { kind: { const: point } } }
+          then:
+            required: [startsAt]
+            properties:
+              startsAt: { type: string, format: date-time }
+              endsAt: { type: "null" }
+              recurrenceRRule: { type: "null" }
+        - if: { properties: { kind: { const: interval } } }
+          then:
+            required: [startsAt, endsAt]
+            properties:
+              startsAt: { type: string, format: date-time }
+              endsAt: { type: string, format: date-time }
+              recurrenceRRule: { type: "null" }
+        - if: { properties: { kind: { const: recurring } } }
+          then:
+            required: [timezone, recurrenceRRule]
+            properties:
+              timezone: { type: string, minLength: 1, maxLength: 128 }
+              recurrenceRRule: { type: string, minLength: 1, maxLength: 512, pattern: "^[^\\r\\n]+$" }
+        - if: { properties: { kind: { const: unknown } } }
+          then:
+            properties:
+              startsAt: { type: "null" }
+              endsAt: { type: "null" }
+              timezone: { type: "null" }
+              recurrenceRRule: { type: "null" }
+
+    DeletionReceipt:
+      type: object
+      additionalProperties: false
+      required: [jobId, logicalVisibility, state, requestedAt, steps]
+      properties:
+        jobId:
+          type: string
+        logicalVisibility:
+          const: hidden
+        state:
+          type: string
+          enum: [queued, running, waiting_provider, completed, completed_with_retention_exception, failed]
+        requestedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: [string, "null"]
+          format: date-time
+        steps:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [target, state]
+            properties:
+              target:
+                type: string
+                enum: [primary, search_index, vector_index, summaries, cache, queue, export, provider]
+              state:
+                type: string
+                enum: [pending, complete, not_applicable, retention_exception, failed]
+              detail:
+                type: string
+                maxLength: 500
+
+    SuppressionPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/SuppressionView"
+        nextCursor:
+          type: [string, "null"]
+          maxLength: 2048
+
+    SuppressionView:
+      type: object
+      additionalProperties: false
+      required: [suppressionId, scopeKind, relationshipId, targetKind, status, startsAt, revision]
+      properties:
+        suppressionId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        scopeKind:
+          type: string
+          enum: [relationship, all_user_data]
+        relationshipId:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 128
+        targetKind:
+          type: string
+          enum: [exact_content, category, source_evidence, conversation_range, user_epoch]
+        category:
+          type: [string, "null"]
+          enum: [credentials, payment, health, precise_location, intimate_content, family, relationships, work, null]
+        sourceEvidenceId:
+          type: [string, "null"]
+          maxLength: 128
+          description: 仅为不可反推正文的不透明 Evidence ID；其他类型返回 null。
+        conversationId:
+          type: [string, "null"]
+          maxLength: 128
+        startSequence:
+          type: [integer, "null"]
+          minimum: 1
+        endSequence:
+          type: [integer, "null"]
+          minimum: 1
+        redactedLabel:
+          type: [string, "null"]
+          maxLength: 160
+          description: 可选的非敏感展示标签；绝不是用于生成指纹的原始内容。
+        status:
+          type: string
+          enum: [active, released, expired]
+        startsAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: [string, "null"]
+          format: date-time
+        revision:
+          type: integer
+          minimum: 1
+      allOf:
+        - if:
+            properties:
+              scopeKind: { const: relationship }
+          then:
+            properties:
+              relationshipId: { type: string, minLength: 1, maxLength: 128 }
+        - if:
+            properties:
+              scopeKind: { const: all_user_data }
+          then:
+            properties:
+              relationshipId: { type: "null" }
+
+    CreateSuppressionRequest:
+      type: object
+      additionalProperties: false
+      required: [scope, target]
+      properties:
+        scope:
+          $ref: "#/components/schemas/SuppressionScopeRef"
+        target:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [kind, content]
+              properties:
+                kind:
+                  const: exact_content
+                content:
+                  type: string
+                  minLength: 1
+                  maxLength: 4000
+                  description: 仅在同步请求中用于规范化和 HMAC；不得原文持久化或入队。
+            - type: object
+              additionalProperties: false
+              required: [kind, category]
+              properties:
+                kind:
+                  const: category
+                category:
+                  type: string
+                  enum: [credentials, payment, health, precise_location, intimate_content, family, relationships, work]
+            - type: object
+              additionalProperties: false
+              required: [kind, evidenceId]
+              properties:
+                kind:
+                  const: source_evidence
+                evidenceId:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                  description: 服务端解析其来源指纹；客户端不能提交指纹。
+            - type: object
+              additionalProperties: false
+              required: [kind, conversationId, startSequence, endSequence]
+              properties:
+                kind:
+                  const: conversation_range
+                conversationId:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                startSequence:
+                  type: integer
+                  minimum: 1
+                endSequence:
+                  type: integer
+                  minimum: 1
+                  description: 必须大于或等于 startSequence；服务端在写 Suppression 前验证闭区间与会话归属。
+        expiresAt:
+          type: [string, "null"]
+          format: date-time
+        redactedLabel:
+          type: [string, "null"]
+          maxLength: 160
+
+    PrivacyDeletionRequest:
+      type: object
+      additionalProperties: false
+      required: [targetKind, confirmationNonce, reason]
+      properties:
+        targetKind:
+          type: string
+          enum: [conversation, relationship, all_user_data]
+        relationshipId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        conversationId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        confirmationNonce:
+          type: string
+          minLength: 32
+          maxLength: 4096
+          description: 近期重新认证后由服务端签发、绑定目标范围和一次使用的不透明凭据。
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+      allOf:
+        - if:
+            properties:
+              targetKind: { const: conversation }
+          then:
+            required: [relationshipId, conversationId]
+        - if:
+            properties:
+              targetKind: { const: relationship }
+          then:
+            required: [relationshipId]
+            properties:
+              conversationId: false
+        - if:
+            properties:
+              targetKind: { const: all_user_data }
+          then:
+            properties:
+              relationshipId: false
+              conversationId: false
+
+    DeepRecallRequest:
+      type: object
+      additionalProperties: false
+      required: [scope, query, trigger]
+      properties:
+        scope:
+          $ref: "#/components/schemas/RelationshipScopeRef"
+        query:
+          type: string
+          minLength: 2
+          maxLength: 2000
+        trigger:
+          type: string
+          enum: [explicit_user_request, ordinary_recall_insufficient, correction_investigation]
+        allowedRealms:
+          type: array
+          uniqueItems: true
+          maxItems: 7
+          items:
+            $ref: "#/components/schemas/Realm"
+
+    DeepRecallResult:
+      type: object
+      additionalProperties: false
+      required: [status, traceId, evidence, answerBasis]
+      properties:
+        status:
+          type: string
+          enum: [found, not_found, conflict]
+        traceId:
+          type: string
+        evidence:
+          type: array
+          maxItems: 12
+          items:
+            type: object
+            additionalProperties: false
+            required: [sourceId, sourceKind, excerpt, realm, recordedAt]
+            properties:
+              sourceId:
+                type: string
+                minLength: 1
+                maxLength: 128
+              sourceKind:
+                type: string
+                enum: [memory_claim, segment_summary, message_archive]
+              excerpt:
+                type: string
+                maxLength: 500
+              realm:
+                $ref: "#/components/schemas/Realm"
+              recordedAt:
+                type: string
+                format: date-time
+        answerBasis:
+          type: string
+          maxLength: 1500
+      allOf:
+        - if: { properties: { status: { const: found } }, required: [status] }
+          then:
+            properties:
+              evidence: { minItems: 1 }
+        - if: { properties: { status: { const: not_found } }, required: [status] }
+          then:
+            properties:
+              evidence: { maxItems: 0 }
+        - if: { properties: { status: { const: conflict } }, required: [status] }
+          then:
+            properties:
+              evidence: { minItems: 2 }
+
+    ConsentPurpose:
+      type: string
+      enum:
+        - chat_processing
+        - raw_conversation_archive
+        - memory_ordinary
+        - memory_sensitive
+        - cross_relationship_memory_share
+        - semantic_index
+        - external_embedding
+        - external_memory_provider
+        - deep_recall
+        - adaptive_profile
+        - analytics
+        - lock_screen_content
+        - proactive_transactional
+        - proactive_onboarding
+        - proactive_relationship
+        - proactive_marketing
+
+    ConsentResourceRef:
+      type: object
+      additionalProperties: false
+      required: [kind, resourceId]
+      properties:
+        kind:
+          type: string
+          enum: [memory_share, provider_profile, lock_screen_policy, proactive_policy, relationship_setting]
+        resourceId:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: 服务端校验归属后用于计算不可逆 scope binding；不会被模型读取。
+
+    ConsentChallenge:
+      type: object
+      additionalProperties: false
+      required: [challengeToken, relationshipId, purpose, policyVersion, disclosure, expiresAt]
+      properties:
+        challengeToken:
+          type: string
+          minLength: 32
+          maxLength: 4096
+          description: 一次性、不透明、绑定当前登录主体与披露摘要；不得写日志。
+        relationshipId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        purpose:
+          $ref: "#/components/schemas/ConsentPurpose"
+        resource:
+          oneOf:
+            - $ref: "#/components/schemas/ConsentResourceRef"
+            - type: "null"
+        policyVersion:
+          type: string
+          minLength: 1
+          maxLength: 128
+        disclosure:
+          type: object
+          additionalProperties: false
+          required: [title, body, locale]
+          properties:
+            title:
+              type: string
+              minLength: 1
+              maxLength: 200
+            body:
+              type: string
+              minLength: 1
+              maxLength: 4000
+            locale:
+              type: string
+              minLength: 2
+              maxLength: 35
+        expiresAt:
+          type: string
+          format: date-time
+      allOf:
+        - if:
+            properties:
+              purpose: { const: cross_relationship_memory_share }
+          then:
+            required: [resource]
+            properties:
+              resource:
+                allOf:
+                  - $ref: "#/components/schemas/ConsentResourceRef"
+                  - type: object
+                    properties:
+                      kind: { const: memory_share }
+
+    ConsentDecisionRequest:
+      type: object
+      additionalProperties: false
+      required: [relationshipId, purpose, decision, policyVersion]
+      properties:
+        relationshipId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        purpose:
+          $ref: "#/components/schemas/ConsentPurpose"
+        decision:
+          type: string
+          enum: [grant, withdraw]
+        policyVersion:
+          type: string
+          minLength: 1
+          maxLength: 128
+        challengeToken:
+          type: [string, "null"]
+          minLength: 32
+          maxLength: 4096
+      allOf:
+        - if:
+            properties:
+              decision: { const: grant }
+          then:
+            required: [challengeToken]
+            properties:
+              challengeToken: { type: string, minLength: 32, maxLength: 4096 }
+        - if:
+            properties:
+              decision: { const: withdraw }
+          then:
+            properties:
+              challengeToken: { type: "null" }
+
+    ConsentView:
+      type: object
+      additionalProperties: false
+      required: [latestEventId, relationshipId, purpose, granted, revision, policyVersion, updatedAt]
+      properties:
+        latestEventId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        relationshipId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        purpose:
+          $ref: "#/components/schemas/ConsentPurpose"
+        granted:
+          type: boolean
+        revision:
+          type: integer
+          minimum: 1
+        policyVersion:
+          type: string
+          minLength: 1
+          maxLength: 128
+        grantedAt:
+          type: [string, "null"]
+          format: date-time
+        withdrawnAt:
+          type: [string, "null"]
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    MemorySettings:
+      type: object
+      additionalProperties: false
+      required: [relationshipId, extractionEnabled, summarizationEnabled, semanticIndexEnabled, embeddingEnabled, externalEmbeddingEnabled, externalMemoryProviderEnabled, deepRecallEnabled, adaptiveProfileEnabled, analyticsEnabled, rawArchiveEnabled, retentionMode, sensitiveMemoryMode, revision]
+      properties:
+        relationshipId:
+          type: string
+        extractionEnabled:
+          type: boolean
+        summarizationEnabled:
+          type: boolean
+          description: 是否允许后台小模型生成新的固定片段摘要；关闭不删除已获授权且仍有效的旧摘要。
+        semanticIndexEnabled:
+          type: boolean
+          description: 是否允许生成全文或向量等派生检索索引；仍受独立 Consent 与敏感度策略约束。
+        embeddingEnabled:
+          type: boolean
+          description: 是否生成允许范围内的 Embedding；关闭后普通召回退化为精确、实体和全文检索。
+        externalEmbeddingEnabled:
+          type: boolean
+          description: 是否允许将已脱敏且获授权的内容发送到外部 Embedding Provider。
+        externalMemoryProviderEnabled:
+          type: boolean
+          description: 是否允许向独立外部记忆 Provider 写入；默认关闭。
+        deepRecallEnabled:
+          type: boolean
+        adaptiveProfileEnabled:
+          type: boolean
+          description: 是否允许周期性提出交流偏好变更；模型只能提案，不能直接改核心人格。
+        analyticsEnabled:
+          type: boolean
+          description: 用户级可选分析；运行必需的安全和计费账本不依赖此开关。
+        rawArchiveEnabled:
+          type: boolean
+          description: 是否按保留策略保存可用于举证或深度召回的加密原始聊天。
+        retentionMode:
+          type: string
+          enum: [ephemeral, redacted_only, standard, extended]
+        sensitiveMemoryMode:
+          type: string
+          enum: [never, explicit_confirmation, explicit_only]
+        revision:
+          type: integer
+          minimum: 1
+      allOf:
+        - if:
+            properties:
+              embeddingEnabled: { const: true }
+          then:
+            properties:
+              semanticIndexEnabled: { const: true }
+        - if:
+            properties:
+              externalEmbeddingEnabled: { const: true }
+          then:
+            properties:
+              embeddingEnabled: { const: true }
+              semanticIndexEnabled: { const: true }
+    MemorySettingsPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        extractionEnabled:
+          type: boolean
+        summarizationEnabled:
+          type: boolean
+        semanticIndexEnabled:
+          type: boolean
+        embeddingEnabled:
+          type: boolean
+        externalEmbeddingEnabled:
+          type: boolean
+        externalMemoryProviderEnabled:
+          type: boolean
+        deepRecallEnabled:
+          type: boolean
+        adaptiveProfileEnabled:
+          type: boolean
+        analyticsEnabled:
+          type: boolean
+        rawArchiveEnabled:
+          type: boolean
+        retentionMode:
+          type: string
+          enum: [ephemeral, redacted_only, standard, extended]
+        sensitiveMemoryMode:
+          type: string
+          enum: [never, explicit_confirmation, explicit_only]
+      allOf:
+        - if:
+            required: [embeddingEnabled]
+            properties:
+              embeddingEnabled: { const: true }
+          then:
+            description: 服务端还必须验证合并后的 semanticIndexEnabled 为 true。
+        - if:
+            required: [externalEmbeddingEnabled]
+            properties:
+              externalEmbeddingEnabled: { const: true }
+          then:
+            description: 服务端还必须验证合并后的 embeddingEnabled 与 semanticIndexEnabled 均为 true。
+
+    ProactiveSettings:
+      type: object
+      additionalProperties: false
+      required: [relationshipId, transactionalEnabled, onboardingEnabled, relationshipEnabled, marketingEnabled, lockScreenContentMode, quietHours, channels, revision]
+      properties:
+        relationshipId:
+          type: string
+        transactionalEnabled:
+          type: boolean
+        onboardingEnabled:
+          type: boolean
+        relationshipEnabled:
+          type: boolean
+        marketingEnabled:
+          type: boolean
+        lockScreenContentMode:
+          type: string
+          enum: [hidden, generic, full]
+          description: full 仍要求单独的锁屏正文 Consent；平台策略可以强制降级。
+        quietHours:
+          $ref: "#/components/schemas/QuietHours"
+        channels:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum: [in_app, device_local, app_push, web_push, email, sms, bot]
+        revision:
+          type: integer
+          minimum: 1
+    ProactiveSettingsPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        transactionalEnabled:
+          type: boolean
+        onboardingEnabled:
+          type: boolean
+        relationshipEnabled:
+          type: boolean
+        marketingEnabled:
+          type: boolean
+        lockScreenContentMode:
+          type: string
+          enum: [hidden, generic, full]
+        quietHours:
+          $ref: "#/components/schemas/QuietHours"
+        channels:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum: [in_app, device_local, app_push, web_push, email, sms, bot]
+    QuietHours:
+      type: object
+      additionalProperties: false
+      required: [enabled, startLocal, endLocal, timezone]
+      properties:
+        enabled:
+          type: boolean
+        startLocal:
+          type: string
+          pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
+        endLocal:
+          type: string
+          pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
+        timezone:
+          type: string
+          minLength: 1
+          maxLength: 128
+
+    ReminderScheduleInput:
+      type: object
+      additionalProperties: false
+      required: [localDateTime, timezone, dstPolicy, quietHoursPolicy, latePolicy]
+      properties:
+        localDateTime:
+          type: string
+          pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9](?::[0-5][0-9])?$"
+          description: 不含 UTC 偏移的当地墙钟时间；必须与 IANA timezone 一起解析。
+        timezone:
+          type: string
+          minLength: 1
+          maxLength: 128
+        dstPolicy:
+          type: string
+          enum: [reject_ambiguous, earlier_offset, later_offset, shift_forward]
+        quietHoursPolicy:
+          type: string
+          enum: [deliver_at_requested_time, move_to_next_allowed_time, skip_if_quiet, reject_on_create_if_quiet]
+          description: 如果请求时间落在静默时段，必须由用户明确选择，服务端不得静默改期。
+        latePolicy:
+          type: string
+          enum: [send_until_expiry, skip_if_late, ask_on_create]
+        expiresAt:
+          type: [string, "null"]
+          format: date-time
+        recurrenceRRule:
+          type: [string, "null"]
+          maxLength: 512
+          pattern: "^[^\\r\\n]+$"
+          description: 只接受服务端声明的 RFC 5545 子集；解析后必须限制频率、COUNT/UNTIL 和最大未来展开范围。
+
+    CreateReminderRequest:
+      type: object
+      additionalProperties: false
+      required: [scope, summary, schedule, channel]
+      properties:
+        scope:
+          $ref: "#/components/schemas/RelationshipScopeRef"
+        summary:
+          type: string
+          minLength: 1
+          maxLength: 1000
+        schedule:
+          $ref: "#/components/schemas/ReminderScheduleInput"
+        channel:
+          type: string
+          enum: [in_app, device_local, app_push, web_push]
+        generationMode:
+          type: string
+          enum: [template_only, template_or_model]
+          default: template_only
+        sourceMessageIds:
+          type: array
+          uniqueItems: true
+          maxItems: 16
+          items:
+            type: string
+            maxLength: 128
+
+    ProactiveEventPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        desiredState:
+          type: string
+          enum: [scheduled, paused]
+          description: 只能暂停或恢复未提交到发送 Outbox 的事件。
+        summary:
+          type: string
+          minLength: 1
+          maxLength: 1000
+        schedule:
+          $ref: "#/components/schemas/ReminderScheduleInput"
+        channel:
+          type: string
+          enum: [in_app, device_local, app_push, web_push]
+        generationMode:
+          type: string
+          enum: [template_only, template_or_model]
+
+    CreateExportRequest:
+      type: object
+      additionalProperties: false
+      required: [scopeKind, includeConversations, encryption]
+      properties:
+        scopeKind:
+          type: string
+          enum: [relationship, all_user_data]
+        relationshipId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        includeConversations:
+          type: boolean
+          default: false
+        encryption:
+          type: object
+          additionalProperties: false
+          required: [mode]
+          properties:
+            mode:
+              type: string
+              enum: [recipient_public_key, one_time_passphrase]
+            recipientPublicKey:
+              type: [string, "null"]
+              maxLength: 8192
+              description: 仅在 recipient_public_key 模式使用；服务端解析后记录 key fingerprint，不信任客户端自报 keyId。
+            passphraseToken:
+              type: [string, "null"]
+              maxLength: 4096
+              description: 仅在 one_time_passphrase 模式使用；是短时密钥服务引用，不是明文口令。
+          allOf:
+            - if:
+                properties:
+                  mode: { const: recipient_public_key }
+              then:
+                required: [recipientPublicKey]
+                properties:
+                  recipientPublicKey: { type: string, minLength: 32, maxLength: 8192 }
+                  passphraseToken: { type: "null" }
+            - if:
+                properties:
+                  mode: { const: one_time_passphrase }
+              then:
+                required: [passphraseToken]
+                properties:
+                  recipientPublicKey: { type: "null" }
+                  passphraseToken: { type: string, minLength: 32, maxLength: 4096 }
+      allOf:
+        - if:
+            properties:
+              scopeKind: { const: relationship }
+          then:
+            required: [relationshipId]
+        - if:
+            properties:
+              scopeKind: { const: all_user_data }
+          then:
+            properties:
+              relationshipId: false
+
+    ImportSource:
+      type: object
+      additionalProperties: false
+      required: [uploadRef, manifestSha256, decryptionKeyToken]
+      properties:
+        uploadRef:
+          type: string
+          minLength: 16
+          maxLength: 2048
+          description: 由受控上传接口签发的不透明引用，不能是任意服务器 URL。
+        manifestSha256:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        decryptionKeyToken:
+          type: string
+          minLength: 32
+          maxLength: 4096
+          description: 短时密钥服务引用；根据清单模式指向口令派生材料或接收方私钥，绝不是明文口令/私钥。
+    CreateImportRequest:
+      type: object
+      additionalProperties: false
+      required: [uploadRef, manifestSha256, decryptionKeyToken, destinationMappings, conflictPolicy]
+      properties:
+        uploadRef:
+          type: string
+          minLength: 16
+          maxLength: 2048
+          description: 由受控上传接口签发的不透明引用，不能是任意服务器 URL。
+        manifestSha256:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        decryptionKeyToken:
+          type: string
+          minLength: 32
+          maxLength: 4096
+          description: 短时密钥服务引用；不得写入 Job Payload、日志或导入包。
+        destinationMappings:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/ImportRelationshipMapping"
+        conflictPolicy:
+          type: string
+          enum: [require_review, keep_destination, import_as_contested]
+    ImportValidation:
+      type: object
+      additionalProperties: false
+      required: [valid, formatVersion, signatureValid, hashesValid, sourceRelationships, warnings, counts]
+      properties:
+        valid:
+          type: boolean
+        formatVersion:
+          type: string
+          minLength: 1
+          maxLength: 32
+        signatureValid:
+          type: boolean
+        hashesValid:
+          type: boolean
+        sourceRelationships:
+          type: array
+          maxItems: 32
+          items:
+            type: object
+            additionalProperties: false
+            required: [sourceRelationshipRef, claimCount, conversationCount]
+            properties:
+              sourceRelationshipRef:
+                type: string
+                minLength: 1
+                maxLength: 128
+              displayLabel:
+                type: [string, "null"]
+                maxLength: 160
+              claimCount:
+                type: integer
+                minimum: 0
+              conversationCount:
+                type: integer
+                minimum: 0
+        warnings:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            maxLength: 500
+        counts:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+
+    ImportRelationshipMapping:
+      type: object
+      additionalProperties: false
+      required: [sourceRelationshipRef, destinationRelationshipId]
+      properties:
+        sourceRelationshipRef:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: 来自已验证清单的随机可移植关系引用，不是来源服务的数据库 ID。
+        destinationRelationshipId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: 必须属于当前令牌主体；映射只确定来源关系归属，不复制旧共享授权。
+    PortabilityJob:
+      type: object
+      additionalProperties: false
+      required: [jobId, kind, state, requestedAt, counts]
+      properties:
+        jobId:
+          type: string
+        kind:
+          type: string
+          enum: [export, import]
+        state:
+          type: string
+          enum: [queued, validating, running, awaiting_review, completed, failed, expired]
+        requestedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: [string, "null"]
+          format: date-time
+        counts:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+        warnings:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            maxLength: 500
+
+    ExportJobResult:
+      type: object
+      additionalProperties: false
+      required: [jobId, kind, state, requestedAt, counts]
+      properties:
+        jobId:
+          type: string
+        kind:
+          const: export
+        state:
+          type: string
+          enum: [queued, running, completed, failed, expired]
+        requestedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: [string, "null"]
+          format: date-time
+        counts:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+        warnings:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            maxLength: 500
+        manifest:
+          oneOf:
+            - $ref: "./schemas/ExportManifest.schema.json"
+            - type: "null"
+        downloadUrl:
+          type: [string, "null"]
+          format: uri
+        downloadExpiresAt:
+          type: [string, "null"]
+          format: date-time
+      allOf:
+        - if:
+            properties:
+              state: { const: completed }
+          then:
+            required: [manifest, downloadUrl, downloadExpiresAt]
+            properties:
+              manifest:
+                $ref: "./schemas/ExportManifest.schema.json"
+              downloadUrl:
+                type: string
+                format: uri
+              downloadExpiresAt:
+                type: string
+                format: date-time
+        - if:
+            properties:
+              state: { const: expired }
+          then:
+            properties:
+              downloadUrl: { type: "null" }
+
+    PromptVersion:
+      type: object
+      additionalProperties: false
+      required: [promptId, version, digest, status, createdAt]
+      properties:
+        promptId:
+          type: string
+        version:
+          type: string
+        digest:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        status:
+          type: string
+          enum: [draft, testing, staged, active, retired, rolled_back]
+        rolloutPercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        createdAt:
+          type: string
+          format: date-time
+        publishedAt:
+          type: [string, "null"]
+          format: date-time
+    CreatePromptDraftRequest:
+      type: object
+      additionalProperties: false
+      required: [version, body, owner, modelClass, changeReason]
+      properties:
+        version:
+          type: string
+          pattern: "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[a-z0-9.-]+)?$"
+        body:
+          type: string
+          minLength: 1
+          maxLength: 120000
+        owner:
+          type: string
+          minLength: 1
+          maxLength: 128
+        modelClass:
+          type: string
+          enum: [main, small, small_or_main]
+        outputSchemaDigest:
+          type: [string, "null"]
+          pattern: "^[a-f0-9]{64}$"
+        changeReason:
+          type: string
+          minLength: 3
+          maxLength: 1000
+    PromptVersionDetail:
+      type: object
+      additionalProperties: false
+      required: [metadata, body, owner, modelClass, changeReason]
+      properties:
+        metadata:
+          $ref: "#/components/schemas/PromptVersion"
+        body:
+          type: string
+          maxLength: 120000
+        owner:
+          type: string
+          maxLength: 128
+        modelClass:
+          type: string
+          enum: [main, small, small_or_main]
+        changeReason:
+          type: string
+          maxLength: 1000
+        inputContract:
+          type: [object, "null"]
+        outputContract:
+          type: [object, "null"]
+        testSummary:
+          type: [object, "null"]
+    AdminJob:
+      type: object
+      additionalProperties: false
+      required: [jobId, kind, state, attempt, maxAttempts, accumulatedCostMicros, createdAt]
+      properties:
+        jobId:
+          type: string
+        kind:
+          type: string
+          maxLength: 128
+        state:
+          type: string
+          enum: [queued, leased, running, succeeded, retry_wait, dead_letter, cancelled]
+        attempt:
+          type: integer
+          minimum: 0
+        maxAttempts:
+          type: integer
+          minimum: 1
+          maximum: 20
+        accumulatedCostMicros:
+          type: integer
+          minimum: 0
+        lastErrorCode:
+          type: [string, "null"]
+          maxLength: 128
+        createdAt:
+          type: string
+          format: date-time
+    AdminMetricsOverview:
+      type: object
+      additionalProperties: false
+      required: [from, to, minimumAggregationSatisfied, counters, latencyMs, costMicros, queueDepth, generatedAt]
+      properties:
+        from:
+          type: string
+          format: date-time
+        to:
+          type: string
+          format: date-time
+        minimumAggregationSatisfied:
+          const: true
+        counters:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+        latencyMs:
+          type: object
+          additionalProperties:
+            type: number
+            minimum: 0
+        costMicros:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+        queueDepth:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+        generatedAt:
+          type: string
+          format: date-time
+    KillSwitch:
+      type: object
+      additionalProperties: false
+      required: [name, enabled, reason, revision, updatedAt]
+      properties:
+        name:
+          type: string
+        enabled:
+          type: boolean
+        reason:
+          type: string
+        revision:
+          type: integer
+          minimum: 1
+        expiresAt:
+          type: [string, "null"]
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, code, traceId]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+          maxLength: 200
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        code:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]{2,63}$"
+        detail:
+          type: string
+          maxLength: 2000
+        traceId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        retryable:
+          type: boolean
+        fields:
+          type: object
+          additionalProperties:
+            type: string
+            maxLength: 500

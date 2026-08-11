@@ -1,0 +1,46 @@
+# 仅用于本机体验和单机试用，不是多实例生产部署模板。
+services:
+  memory-api:
+    build:
+      context: .
+      dockerfile: deploy/docker/api.Dockerfile
+    environment:
+      MEMORYOS_DEMO: "true"
+      # Docker NAT makes a host-loopback request appear as the private bridge.
+      # Safe here only because the published port below is fixed to 127.0.0.1.
+      MEMORYOS_DEMO_ALLOW_PROXY: "true"
+      MEMORYOS_HOST: "0.0.0.0"
+      MEMORYOS_PORT: "8787"
+      MEMORYOS_DB_PATH: "/data/heartmemory.sqlite"
+      MEMORYOS_RUNTIME_PATH: "/data/runtime-state.json"
+      MEMORYOS_AUTH_SECRET: "${MEMORYOS_AUTH_SECRET:?请在 .env 中设置至少 32 字节的 MEMORYOS_AUTH_SECRET}"
+      MEMORYOS_FINGERPRINT_KEY: "${MEMORYOS_FINGERPRINT_KEY:?请在 .env 中设置 MEMORYOS_FINGERPRINT_KEY}"
+      MEMORYOS_ALLOWED_ORIGIN: "http://127.0.0.1:3000"
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - memory-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>{if(!r.ok)process.exit(1)})"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  memory-console:
+    build:
+      context: .
+      dockerfile: deploy/docker/console.Dockerfile
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3000"
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      memory-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  memory-data:

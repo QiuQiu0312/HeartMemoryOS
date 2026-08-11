@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 2,
+  "registryVersion": "2.0.0",
+  "authoritative": true,
+  "prompts": [
+    {
+      "promptId": "core-persona",
+      "version": "2.1.0",
+      "file": "core-persona.v2.yaml",
+      "lifecycle": "stable_prefix",
+      "modelClass": "main",
+      "outputSchema": null,
+      "enabledByDefault": true
+    },
+    {
+      "promptId": "main-chat-policy",
+      "version": "2.0.0",
+      "file": "main-chat-policy.v2.yaml",
+      "lifecycle": "stable_prefix",
+      "modelClass": "main",
+      "outputSchema": null,
+      "enabledByDefault": true
+    },
+    {
+      "promptId": "memory-extraction",
+      "version": "2.0.0",
+      "file": "memory-extraction.v2.yaml",
+      "lifecycle": "background",
+      "modelClass": "small",
+      "outputSchema": "../contracts/schemas/MemoryExtractionResult.schema.json",
+      "enabledByDefault": false
+    },
+    {
+      "promptId": "segment-summary",
+      "version": "2.0.0",
+      "file": "segment-summary.v2.yaml",
+      "lifecycle": "background",
+      "modelClass": "small",
+      "outputSchema": "inline:segment-summary-result-v2",
+      "enabledByDefault": false
+    },
+    {
+      "promptId": "deep-recall",
+      "version": "2.0.0",
+      "file": "deep-recall.v2.yaml",
+      "lifecycle": "on_demand",
+      "modelClass": "small_or_main",
+      "outputSchema": "inline:deep-recall-judgement-v2",
+      "enabledByDefault": false
+    },
+    {
+      "promptId": "adaptive-profile",
+      "version": "2.0.0",
+      "file": "adaptive-profile.v2.yaml",
+      "lifecycle": "periodic",
+      "modelClass": "small",
+      "outputSchema": "inline:adaptive-profile-proposal-v2",
+      "enabledByDefault": false
+    },
+    {
+      "promptId": "proactive-message",
+      "version": "2.0.0",
+      "file": "proactive-message.v2.yaml",
+      "lifecycle": "scheduled_after_policy_gate",
+      "modelClass": "small_or_main",
+      "outputSchema": "inline:proactive-draft-v2",
+      "enabledByDefault": false
+    },
+    {
+      "promptId": "safety-review",
+      "version": "2.0.0",
+      "file": "safety-review.v2.yaml",
+      "lifecycle": "post_generation_gate",
+      "modelClass": "small",
+      "outputSchema": "inline:safety-decision-v2",
+      "enabledByDefault": true
+    }
+  ]
+}

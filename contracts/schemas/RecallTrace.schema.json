@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://companion-memory.invalid/v2/schemas/RecallTrace.schema.json",
+  "title": "RecallTrace",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "traceId", "turnId", "mode", "queryHmac", "candidates",
+    "finalMemoryIds", "tokenUsage", "embeddingUsage", "modelUsage", "versions", "createdAt", "expiresAt"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "traceId": { "$ref": "#/$defs/Id" },
+    "turnId": { "$ref": "#/$defs/Id" },
+    "mode": { "enum": ["none", "exact", "hybrid", "deep"] },
+    "queryHmac": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43,64}$",
+      "description": "A keyed, encoded HMAC used for correlation; never an unhasalted query hash."
+    },
+    "queryRedacted": { "type": ["string", "null"], "maxLength": 1000 },
+    "routerReasons": {
+      "type": "array",
+      "maxItems": 16,
+      "items": { "type": "string", "maxLength": 128 }
+    },
+    "candidates": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "$ref": "#/$defs/CandidateTrace" }
+    },
+    "finalMemoryIds": {
+      "type": "array",
+      "maxItems": 12,
+      "items": { "$ref": "#/$defs/Id" },
+      "uniqueItems": true
+    },
+    "tokenUsage": { "$ref": "#/$defs/Usage" },
+    "embeddingUsage": { "$ref": "#/$defs/Usage" },
+    "modelUsage": { "$ref": "#/$defs/Usage" },
+    "degraded": { "type": "boolean", "default": false },
+    "degradationReasons": {
+      "type": "array",
+      "maxItems": 16,
+      "items": { "type": "string", "maxLength": 128 }
+    },
+    "versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "retrievalConfig", "index"],
+      "properties": {
+        "policy": { "type": "string", "maxLength": 128 },
+        "retrievalConfig": { "type": "string", "maxLength": 128 },
+        "index": { "type": "string", "maxLength": 128 },
+        "embedding": { "type": ["string", "null"], "maxLength": 128 },
+        "prompt": { "type": ["string", "null"], "maxLength": 128 }
+      }
+    },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "Id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "Usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["calls", "inputTokens", "outputTokens"],
+      "properties": {
+        "calls": { "type": "integer", "minimum": 0 },
+        "inputTokens": { "type": "integer", "minimum": 0 },
+        "outputTokens": { "type": "integer", "minimum": 0 },
+        "cacheReadTokens": { "type": "integer", "minimum": 0 },
+        "estimatedCostMicros": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "CandidateTrace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceId", "sourceKind", "filterDecision", "selected"],
+      "properties": {
+        "sourceId": { "$ref": "#/$defs/Id" },
+        "sourceKind": { "enum": ["memory_claim", "segment_summary", "message_archive", "profile_projection"] },
+        "lexicalRank": { "type": ["integer", "null"], "minimum": 1 },
+        "vectorRank": { "type": ["integer", "null"], "minimum": 1 },
+        "rrfScore": { "type": ["number", "null"], "minimum": 0 },
+        "filterDecision": {
+          "enum": ["eligible", "wrong_scope", "wrong_realm", "no_consent", "suppressed", "deleted", "expired", "contested", "low_relevance", "duplicate", "over_budget"]
+        },
+        "selected": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "selected": { "const": true } }, "required": ["selected"] },
+          "then": { "properties": { "filterDecision": { "const": "eligible" } } }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,72 @@
+name: 缺陷报告
+description: 报告可以稳定复现的问题；不要提交密钥或真实聊天数据
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。安全漏洞请阅读 SECURITY.md 并私密报告。
+  - type: dropdown
+    id: area
+    attributes:
+      label: 问题区域
+      options:
+        - 本地启动
+        - 聊天与模型 API
+        - 长期记忆与召回
+        - 摘要或后台任务
+        - 主动消息
+        - 控制台界面
+        - 接入或部署
+        - 文档
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本或提交
+      placeholder: 例如 v2.0.0-alpha.1 或 commit id
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 环境
+      placeholder: macOS 15 / Windows 10；Node.js 24；本机或服务器
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤
+      description: 请使用脱敏或虚构数据
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 脱敏日志
+      description: 不要包含 API Key、.env、真实对话、用户身份或数据库
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交确认
+      options:
+        - label: 我已经搜索过已有 Issue
+          required: true
+        - label: 我确认内容中没有密钥、真实聊天记录或个人信息
+          required: true
+        - label: 这不是需要私密报告的安全漏洞
+          required: true
