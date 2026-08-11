@@ -3,9 +3,9 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { parse as parseYamlDocument } from "yaml";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const contractsDir = path.join(projectRoot, "contracts");
@@ -20,15 +20,11 @@ function parseJson(relativePath) {
 }
 
 function parseYaml(absolutePath) {
-  const ruby = [
-    "require 'yaml'",
-    "require 'json'",
-    "doc = YAML.safe_load(File.read(ARGV.fetch(0)), [], [], true)",
-    "STDOUT.write(JSON.generate(doc))",
-  ].join("; ");
-  const result = spawnSync("ruby", ["-e", ruby, absolutePath], { encoding: "utf8" });
-  assert.equal(result.status, 0, `YAML parse failed for ${absolutePath}: ${result.stderr}`);
-  return JSON.parse(result.stdout);
+  try {
+    return parseYamlDocument(fs.readFileSync(absolutePath, "utf8"));
+  } catch (error) {
+    assert.fail(`YAML parse failed for ${absolutePath}: ${error.message}`);
+  }
 }
 
 function walk(value, visit, pointer = "#") {

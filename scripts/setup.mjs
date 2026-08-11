@@ -13,7 +13,7 @@ const envPath = join(root, ".env");
 const examplePath = join(root, ".env.example");
 
 console.log("\n心忆 MemoryOS V2 · 首次设置\n");
-console.log("核心后端不需要安装第三方依赖；本地聊天页与可视化控制台需要一次 npm 安装。\n");
+console.log("核心后端运行时不依赖第三方包；首次设置会安装少量跨平台校验工具和本地聊天界面依赖。\n");
 
 let mode = "local";
 if (!yes) {
@@ -38,12 +38,21 @@ if (await exists(envPath)) {
 
 await mkdir(join(root, "data"), { recursive: true });
 
+const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+if (!skipInstall && !(await exists(join(root, "node_modules/yaml/package.json")))) {
+  console.log("… 正在安装跨平台校验工具");
+  await run(npm, ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], root);
+  console.log("✓ 跨平台校验工具安装完成");
+} else if (!skipInstall) {
+  console.log("✓ 跨平台校验工具已存在");
+}
+
 if (!skipInstall && !(await exists(join(root, "apps/console/node_modules")))) {
   console.log("… 正在安装可视化控制台依赖");
-  await run(process.platform === "win32" ? "npm.cmd" : "npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], join(root, "apps/console"));
+  await run(npm, ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], join(root, "apps/console"));
   console.log("✓ 控制台依赖安装完成");
 } else if (skipInstall) {
-  console.log("• 已按参数跳过控制台依赖安装");
+  console.log("• 已按参数跳过依赖安装");
 } else {
   console.log("✓ 控制台依赖已存在");
 }

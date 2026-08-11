@@ -16,7 +16,11 @@ if (!supportedNode()) {
   process.exit(1);
 }
 
-if (!(await exists(join(root, ".env"))) || !(await exists(join(root, "apps/console/node_modules")))) {
+if (
+  !(await exists(join(root, ".env")))
+  || !(await exists(join(root, "node_modules/yaml/package.json")))
+  || !(await exists(join(root, "apps/console/node_modules")))
+) {
   console.log("检测到首次运行，正在生成本机配置并安装界面依赖…\n");
   await run(process.execPath, ["scripts/setup.mjs", "--yes"], root);
 }
